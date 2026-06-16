@@ -2,17 +2,17 @@ import streamlit as st
 import pandas as pd
 import re
 
-# Set up a clean browser tab and layout
+# Set up clean browser tab and layout
 st.set_page_config(page_title="BCPL GST Sanitizer", layout="centered")
 
 st.title("📦 BCPL E-commerce GST Sanitizer")
 st.write("Drop your raw Amazon or Flipkart sheets below to instantly wipe out errors.")
 
 # =========================================================================
-# 🛑 BCPL CONFIGURATION SETTINGS (Change these to match your exact sheet headers!)
+# 🛑 BCPL CONFIGURATION SETTINGS
 # =========================================================================
-EXACT_TAX_COLUMN_NAME = "Total Tax Rate"  # 👈 TYPE THE EXACT NAME OF YOUR TOTAL TAX COLUMN HERE
-EXACT_HSN_COLUMN_NAME = "Hsn/sac"         # 👈 TYPE THE EXACT NAME OF YOUR HSN COLUMN HERE
+EXACT_TAX_COLUMN_NAME = "Total Tax rate"  
+EXACT_HSN_COLUMN_NAME = "Hsn/sac"         
 
 sku_hsn_catalog = {
     "SKU_SAMPLE_1": "33049910",  
@@ -24,7 +24,6 @@ sku_hsn_catalog = {
 uploaded_file = st.file_uploader("Upload your raw Excel or CSV report", type=["xlsx", "xls", "csv"])
 
 if uploaded_file:
-    # Force Pandas to read every cell as raw text string
     if uploaded_file.name.endswith(('.xlsx', '.xls')):
         df = pd.read_excel(uploaded_file, dtype=str)
     else:
@@ -41,7 +40,6 @@ if uploaded_file:
     sku_col = None
     tax_col = None
     
-    # Assign the user-configured targets directly first
     for col in df.columns:
         if str(col).strip() == EXACT_HSN_COLUMN_NAME:
             hsn_col = col
@@ -49,15 +47,6 @@ if uploaded_file:
             tax_col = col
         if str(col).strip().lower() in ['sku', 'fsn', 'seller-sku', 'item']:
             sku_col = col
-
-    # Backups if direct names aren't found in this specific upload file
-    if not hsn_col:
-        hsn_candidates = [c for c in df.columns if 'hsn' in str(c).lower()]
-        if hsn_candidates: hsn_col = hsn_candidates[0]
-        
-    if not tax_col:
-        tax_candidates = [c for c in df.columns if 'rate' in str(c).lower() or 'tax' in str(c).lower()]
-        if tax_candidates: tax_col = tax_candidates[0]
 
     # 4. EXECUTE DATA RECONCILIATION
     if hsn_col:
@@ -70,7 +59,7 @@ if uploaded_file:
         if sku_col:
             df[sku_col] = df[sku_col].fillna("").astype(str).str.strip()
 
-        # PASS 1: Normalize HSN codes first so we can accurately group them
+        # PASS 1: Normalize HSN codes first
         def initial_hsn_cleanup(row):
             val = str(row[hsn_col]).strip()
             sku_val = str(row[sku_col]).strip() if sku_col else ""
@@ -91,51 +80,59 @@ if uploaded_file:
 
         df['_temp_hsn'] = df.apply(initial_hsn_cleanup, axis=1)
 
-        # PASS 2: DEEP NUMERICAL TAX STANDARDIZER & VOTE CALCULATOR
+        # PASS 2: CODES TO NUMBER TRANSLATOR & VOTE ENGINE
         tax_corrections_made = 0
         hsn_majority_tax_map = {}
 
         if tax_col:
-            # Clean up the raw tax text values so '18.0', '18%', and '18' match perfectly as integer numbers
-            def clean_tax_string(val):
+            # Smart translator for Amazon Product Tax Codes (PTC)
+            def standard_tax_extractor(val):
                 if pd.isna(val) or str(val).strip() in ['nan', 'None', '', '<NA>']:
-                    return "0"
-                s = str(val).strip().replace('%', '')
-                s = re.sub(r'\.0+$', '', s)
-                s = s.split('.')[0]
-                return s if s.isdigit() else "0"
+                    return "UNKNOWN"
+                s = str(val).strip().upper()
+                
+                # Check for common Amazon tax brackets hidden in codes
+                if '18' in s or 'STANDARD' in s: return "18"
+                if '5' in s or 'REDUCED' in s or 'LOW' in s: return "5"
+                if '12' in s: return "12"
+                if '28' in s: return "28"
+                if '0' in s or 'EXEMPT' in s: return "0"
+                
+                return s # Fallback to original code if it's unique
 
-            df['_temp_tax_clean'] = df[tax_col].apply(clean_tax_string)
+            df['_temp_tax_clean'] = df[tax_col].apply(standard_tax_extractor)
 
-            # Group by our clean HSN code and look at the standardized Tax values
+            # Group by clean HSN and find the dominant tax code/value
             for hsn_code, group in df.groupby('_temp_hsn'):
                 if hsn_code != "MISSING HSN" and not group['_temp_tax_clean'].empty:
                     majority_tax = group['_temp_tax_clean'].value_counts().index[0]
                     hsn_majority_tax_map[hsn_code] = majority_tax
 
-            # Apply the majority rule back to your original targeted tax column rows
+            # Apply the majority rule back to the Product Tax Code column
             def harmonize_taxes(row):
                 global tax_corrections_made
                 hsn = row['_temp_hsn']
-                current_raw_tax = str(row[tax_col]).strip()
+                current_raw_ptc = str(row[tax_col]).strip()
                 current_clean_tax = row['_temp_tax_clean']
                 
                 if hsn in hsn_majority_tax_map:
-                    correct_majority_tax = hsn_majority_tax_map[hsn]
-                    if current_clean_tax != correct_majority_tax:
+                    correct_majority_value = hsn_majority_tax_map[hsn]
+                    
+                    # If this row is using a minority tax rate class, find a correct code from the same HSN group
+                    if current_clean_tax != correct_majority_value and correct_majority_value != "UNKNOWN":
                         tax_corrections_made += 1
-                        # Maintain original formatting layout type
-                        if '.' in current_raw_tax:
-                            return correct_majority_tax + ".0"
-                        if '%' in current_raw_tax:
-                            return correct_majority_tax + "%"
-                        return correct_majority_tax
-                return current_raw_tax
+                        
+                        # Find a sample raw Amazon code from this HSN group that matches the correct rate
+                        sample_match = df[(df['_temp_hsn'] == hsn) & (df['_temp_tax_clean'] == correct_majority_value)]
+                        if not sample_match.empty:
+                            return str(sample_match[tax_col].iloc[0]).strip()
+                        
+                return current_raw_ptc
 
             df[tax_col] = df.apply(harmonize_taxes, axis=1)
-            df.drop(columns=['_temp_tax_clean'], inplace=True) # Trash temp column
+            df.drop(columns=['_temp_tax_clean'], inplace=True)
 
-        # PASS 3: FINALIZE EXCEL FORMULA PROTECTION SHIELD FOR HSNs
+        # PASS 3: FINALIZE PROTECTION SHIELD FOR HSNs
         padded_count = 0
         filled_count = 0
         missing_count = 0
@@ -150,14 +147,14 @@ if uploaded_file:
             return f'="{val}"'
 
         df[hsn_col] = df['_temp_hsn'].apply(wrap_hsn_shield)
-        df.drop(columns=['_temp_hsn'], inplace=True) # Trash the temporary column
+        df.drop(columns=['_temp_hsn'], inplace=True)
 
         # 5. RENDER SUCCESS DASHBOARD
         st.success(f"✨ File parsed successfully! Cleaned up {blank_rows} blank rows.")
         st.info(f"🔢 HSN PADDING UPDATE: Processed and protected **{padded_count} HSN codes** with Excel text shields.")
         
         if tax_col and tax_corrections_made > 0:
-            st.warning(f"⚖️ TAX AUTO-CORRECTION: Overwrote **{tax_corrections_made} rows** in your specified column **'{tax_col}'** to fix conflicting double tax rates!")
+            st.warning(f"⚖️ TAX AUTO-CORRECTION: Automatically aligned **{tax_corrections_made} rows** inside **'{tax_col}'** to fix conflicting tax rates based on majority rule!")
         elif tax_col:
             st.success(f"✅ Tax Rate Integrity: Checked all rows under column '{tax_col}'. No conflicting tax rate instances remain.")
 
@@ -170,7 +167,6 @@ if uploaded_file:
     st.write("### Data Preview Grid:")
     st.dataframe(df.head(50))
     
-    # Convert data into a download packet
     csv_data = df.to_csv(index=False).encode('utf-8')
     
     # 6. DOWNLOAD COMPONENT BUTTON
