@@ -1,0 +1,65 @@
+import streamlit as st
+import pandas as pd
+
+# Set up a clean browser tab and layout
+st.set_page_config(page_title="BCPL GST Sanitizer", layout="centered")
+
+st.title("📦 BCPL E-commerce GST Sanitizer")
+st.write("Drop your raw Amazon or Flipkart sheets below to instantly wipe out errors.")
+
+# 1. FILE UPLOADER COMPONENT (Handles large files seamlessly in browser RAM)
+uploaded_file = st.file_uploader("Upload your raw Excel or CSV report", type=["xlsx", "xls", "csv"])
+
+if uploaded_file:
+    # Read the file based on extension
+    if uploaded_file.name.endswith(('.xlsx', '.xls')):
+        df = pd.read_excel(uploaded_file)
+    else:
+        df = pd.read_csv(uploaded_file, low_memory=False)
+        
+    initial_rows = len(df)
+    
+    # 2. DATA CLEANING STEP 1: Remove empty rows
+    df.dropna(how='all', inplace=True)
+    blank_rows = initial_rows - len(df)
+
+    # 3. AUTO-DETECT COLUMNS FOR AMAZON OR FLIPKART
+    hsn_col = None
+    sku_col = None
+    
+    # Simple smart matching scanner for column headers
+    for col in df.columns:
+        col_lower = str(col).lower()
+        if 'hsn' in col_lower: hsn_col = col
+        if 'sku' in col_lower or 'fsn' in col_lower: sku_col = col
+
+    # Default fallback overrides if platform exact naming matches
+    if "Hsn/sac" in df.columns: hsn_col = "Hsn/sac"
+    if "Sku" in df.columns: sku_col = "Sku"
+
+    # 4. EXECUTE DATA STRUCTURING
+    if hsn_col:
+        # Pad 7-digit numbers into compliant 8-digit HSN codes automatically
+        df[hsn_col] = df[hsn_col].astype(str).str.strip().str.replace('.0', '', regex=False)
+        df[hsn_col] = df[hsn_col].apply(lambda x: '0' + x if len(x) == 7 else x)
+        
+    if sku_col:
+        df[sku_col] = df[sku_col].astype(str).str.strip()
+
+    # 5. RENDER THE INTERFACE RESULTS
+    st.success(f"✨ Analysis complete! Cleaned up {blank_rows} blank rows.")
+    
+    # Display a live visual table review to your team
+    st.write("### Data Preview Grid:")
+    st.dataframe(df.head(50))
+    
+    # Convert data into a download packet
+    csv_data = df.to_csv(index=False).encode('utf-8')
+    
+    # 6. DOWNLOAD COMPONENT BUTTON
+    st.download_button(
+        label="📥 Download Sanitized File for Repotic",
+        data=csv_data,
+        file_name=f"CLEANED_{uploaded_file.name.split('.')[0]}.csv",
+        mime="text/csv"
+    )
