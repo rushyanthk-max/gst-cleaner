@@ -37,11 +37,21 @@ if uploaded_file:
     if "Hsn/sac" in df.columns: hsn_col = "Hsn/sac"
     if "Sku" in df.columns: sku_col = "Sku"
 
-    # 4. EXECUTE DATA STRUCTURING
+    # 4. EXECUTE DATA STRUCTURING (CRASH-PROOF)
     if hsn_col:
-        # Pad 7-digit numbers into compliant 8-digit HSN codes automatically
-        df[hsn_col] = df[hsn_col].astype(str).str.strip().str.replace('.0', '', regex=False)
-        df[hsn_col] = df[hsn_col].apply(lambda x: '0' + x if len(x) == 7 else x)
+        # Force the HSN column to clean text strings, ignoring blank decimal markings safely
+        df[hsn_col] = df[hsn_col].astype(str).str.strip().str.replace(r'\.0$', '', regex=True)
+        
+        # Secure function that skips empty fields and pads 7-digit codes flawlessly
+        def secure_hsn_padding(val):
+            val_str = str(val).strip()
+            if val_str in ['nan', 'None', '', '<NA>']:
+                return ""
+            if len(val_str) == 7:
+                return '0' + val_str
+            return val_str
+
+        df[hsn_col] = df[hsn_col].apply(secure_hsn_padding)
         
     if sku_col:
         df[sku_col] = df[sku_col].astype(str).str.strip()
