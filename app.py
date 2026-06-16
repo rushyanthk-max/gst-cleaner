@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import re
 
 # Set up a clean browser tab and layout
 st.set_page_config(page_title="BCPL GST Sanitizer", layout="centered")
@@ -32,42 +33,57 @@ if uploaded_file:
     df.dropna(how='all', inplace=True)
     blank_rows = initial_rows - len(df)
 
-    # 3. POSITION-BASED COLUMN SCANNER (HSN, SKU, and Tax Rate)
+    # 3. POSITION-BASED COLUMN SCANNER
     hsn_col = None
     sku_col = None
     tax_col = None
     
+    # Target exactly the specific column names e-commerce platforms use
     for col in df.columns:
         clean_col_name = str(col).strip().lower()
         if 'hsn' in clean_col_name: hsn_col = col
         if 'sku' in clean_col_name or 'fsn' in clean_col_name: sku_col = col
-        if 'tax' in clean_col_name or 'rate' in clean_col_name or 'igst' in clean_col_name: tax_col = col
 
-    # Hardcoded fallback overrides for standard platforms
+    # HARD TARGET SPECIFIC TAX COLUMNS FOR AMAZON AND FLIPKART
+    amazon_tax_headers = ['igst rate', 'cgst rate', 'sgst rate', 'tax rate', 'invoice level tax']
+    flipkart_tax_headers = ['tax percentage', 'tax rate', 'igst_rate', 'rate_percentage']
+    
+    # Try exact matches first
+    for col in df.columns:
+        c_low = str(col).strip().lower()
+        if c_low in amazon_tax_headers or c_low in flipkart_tax_headers:
+            tax_col = col
+            break
+            
+    # Fallback if names are slightly shifted
+    if not tax_col:
+        for col in df.columns:
+            c_low = str(col).strip().lower()
+            if 'igst' in c_low and 'rate' in c_low:
+                tax_col = col
+                break
+            elif 'tax' in c_low and 'rate' in c_low:
+                tax_col = col
+                break
+
+    # Final emergency fallback if nothing matches
+    if not tax_col:
+        tax_candidates = [c for c in df.columns if 'rate' in str(c).lower() or 'tax' in str(c).lower()]
+        if tax_candidates: tax_col = tax_candidates[0]
+
     if "Hsn/sac" in df.columns: hsn_col = "Hsn/sac"
     if "Sku" in df.columns: sku_col = "Sku"
-    
-    # Smart tax column fallbacks for Amazon MTR / Flipkart layouts
-    if not tax_col:
-        tax_candidates = [c for c in df.columns if any(k in str(c).lower() for k in ['igst rate', 'tax percentage', 'tax_rate', 'rate'])]
-        if tax_candidates: tax_col = tax_candidates[0]
 
     # 4. EXECUTE DATA RECONCILIATION
     if hsn_col:
+        st.info(f"🔍 System targeted HSN Column: **'{hsn_col}'** | Tax Column: **'{tax_col}'**")
+        
         # Initial Deep Clean
         df[hsn_col] = df[hsn_col].fillna("").astype(str).str.strip().str.replace(r'\.0+$', '', regex=True)
         df[hsn_col] = df[hsn_col].replace(['nan', 'None', '<na>', '<NA>'], "")
         
         if sku_col:
             df[sku_col] = df[sku_col].fillna("").astype(str).str.strip()
-            
-        if tax_col:
-            # Clean up tax column strings (e.g., convert 18.0 or 18% into standard numerical text strings)
-            df[tax_col] = df[tax_col].fillna("0").astype(str).str.strip().str.replace(r'\.0+$', '', regex=True).str.replace('%', '', regex=False)
-
-        filled_count = 0
-        padded_count = 0
-        missing_count = 0
 
         # PASS 1: Normalize HSN codes first so we can accurately group them
         def initial_hsn_cleanup(row):
@@ -90,34 +106,57 @@ if uploaded_file:
 
         df['_temp_hsn'] = df.apply(initial_hsn_cleanup, axis=1)
 
-        # PASS 2: MAJORITY TAX CALCULATION ENGINE
+        # PASS 2: DEEP NUMERICAL TAX STANDARDIZER & VOTE CALCULATOR
         tax_corrections_made = 0
         hsn_majority_tax_map = {}
 
         if tax_col:
-            # Group by our clean HSN code and look at the Tax column values
-            # .value_counts().index[0] extracts the mathematical "Mode" (the value that shows up most often)
+            # Clean up the raw tax text values so '18.0', '18%', and '18' match perfectly as integer numbers
+            def clean_tax_string(val):
+                if pd.isna(val) or str(val).strip() in ['nan', 'None', '', '<NA>']:
+                    return "0"
+                # Strip out percentage signs, decimals, and text characters
+                s = str(val).strip().replace('%', '')
+                s = re.sub(r'\.0+$', '', s) # converts 18.00 -> 18
+                s = s.split('.')[0]         # fallback if it's a weird decimal string
+                return s if s.isdigit() else "0"
+
+            df['_temp_tax_clean'] = df[tax_col].apply(clean_tax_string)
+
+            # Group by our clean HSN code and look at the standardized Tax values
             for hsn_code, group in df.groupby('_temp_hsn'):
-                if hsn_code != "MISSING HSN" and not group[tax_col].empty:
-                    majority_tax = group[tax_col].value_counts().index[0]
+                if hsn_code != "MISSING HSN" and not group['_temp_tax_clean'].empty:
+                    # Calculate the majority dominant tax integer value
+                    majority_tax = group['_temp_tax_clean'].value_counts().index[0]
                     hsn_majority_tax_map[hsn_code] = majority_tax
 
-            # Apply the majority rule back to the tax column rows
+            # Apply the majority rule back to your original targeted tax column rows
             def harmonize_taxes(row):
                 global tax_corrections_made
                 hsn = row['_temp_hsn']
-                current_tax = row[tax_col]
+                current_raw_tax = str(row[tax_col]).strip()
+                current_clean_tax = row['_temp_tax_clean']
                 
                 if hsn in hsn_majority_tax_map:
                     correct_majority_tax = hsn_majority_tax_map[hsn]
-                    if current_tax != correct_majority_tax:
+                    if current_clean_tax != correct_majority_tax:
                         tax_corrections_made += 1
+                        # Maintain original formatting layout type (if the original sheet used decimals, append it back)
+                        if '.' in current_raw_tax:
+                            return correct_majority_tax + ".0"
+                        if '%' in current_raw_tax:
+                            return correct_majority_tax + "%"
                         return correct_majority_tax
-                return current_tax
+                return current_raw_tax
 
             df[tax_col] = df.apply(harmonize_taxes, axis=1)
+            df.drop(columns=['_temp_tax_clean'], inplace=True) # Trash temp column
 
         # PASS 3: FINALIZE EXCEL FORMULA PROTECTION SHIELD FOR HSNs
+        padded_count = 0
+        filled_count = 0
+        missing_count = 0
+
         def wrap_hsn_shield(val):
             global padded_count, filled_count, missing_count
             if val == "MISSING HSN":
@@ -135,9 +174,9 @@ if uploaded_file:
         st.info(f"🔢 HSN PADDING UPDATE: Processed and protected **{padded_count} HSN codes** with Excel text shields.")
         
         if tax_col and tax_corrections_made > 0:
-            st.warning(f"⚖️ TAX AUTO-CORRECTION: Identified mismatched tax rates! Automatically updated **{tax_corrections_made} rows** to match the dominant majority tax rate for their respective HSN codes.")
+            st.warning(f"⚖️ TAX AUTO-CORRECTION: Overwrote **{tax_corrections_made} rows** in the column **'{tax_col}'** to match the dominant majority tax rate for their HSN groups!")
         elif tax_col:
-            st.success("✅ Tax Rate Integrity: Checked all rows. No conflicting double tax rate instances detected across matching HSN groups.")
+            st.success(f"✅ Tax Rate Integrity: Checked all rows under column '{tax_col}'. No conflicting tax rate instances remain.")
 
         if missing_count > 0:
             st.warning(f"⚠️ Warning: Found {missing_count} fields that remain blank. Marked as 'MISSING HSN'.")
