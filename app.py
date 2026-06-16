@@ -9,14 +9,10 @@ st.write("Drop your raw Amazon or Flipkart sheets below to instantly wipe out er
 
 # =========================================================================
 # 🛑 BCPL MASTER PRODUCT CATALOG (Add your SKUs and correct HSNs here!)
-# Whenever an HSN is blank, the app will use this list to automatically fill it.
-# Syntax: "YOUR_SKU": "CORRECT_HSN"
 # =========================================================================
 sku_hsn_catalog = {
-    "SKU_SAMPLE_1": "33049910",  # Example: Face cream SKU matching an 8-digit HSN
-    "SKU_SAMPLE_2": "84212100",  # Example: Water filter SKU matching an 8-digit HSN
-    "MUG-BLUE-01": "69111011",   # Add your real company SKUs below exactly like this
-    "TSHIRT-BLK-M": "61091000",
+    "SKU_SAMPLE_1": "33049910",  
+    "MUG-BLUE-01": "69111011",   
 }
 # =========================================================================
 
@@ -24,7 +20,7 @@ sku_hsn_catalog = {
 uploaded_file = st.file_uploader("Upload your raw Excel or CSV report", type=["xlsx", "xls", "csv"])
 
 if uploaded_file:
-    # Read file forcing pure text interpretation
+    # Force Pandas to read every cell as raw, untouched text string
     if uploaded_file.name.endswith(('.xlsx', '.xls')):
         df = pd.read_excel(uploaded_file, dtype=str)
     else:
@@ -32,71 +28,87 @@ if uploaded_file:
         
     initial_rows = len(df)
     
-    # 2. DATA CLEANING STEP 1: Remove completely blank formatting rows
+    # 2. REMOVE COMPLETELY BLANK ROWS
     df.dropna(how='all', inplace=True)
     blank_rows = initial_rows - len(df)
 
-    # 3. AUTO-DETECT COLUMNS FOR AMAZON OR FLIPKART
+    # 3. POSITION-BASED COLUMN SCANNER (Bypasses header text naming bugs)
     hsn_col = None
     sku_col = None
     
+    # Scan columns checking for lowercase structural keyword fragments
     for col in df.columns:
-        col_lower = str(col).lower()
-        if 'hsn' in col_lower: hsn_col = col
-        if 'sku' in col_lower or 'fsn' in col_lower: sku_col = col
+        clean_col_name = str(col).strip().lower()
+        if 'hsn' in clean_col_name: 
+            hsn_col = col
+        if 'sku' in clean_col_name or 'fsn' in clean_col_name: 
+            sku_col = col
 
-    if "Hsn/sac" in df.columns: hsn_col = "Hsn/sac"
-    if "Sku" in df.columns: sku_col = "Sku"
+    # EMERGENCY BACKUP: If text scanning still fails, fallback to direct positions
+    if not hsn_col:
+        # Tries to find common e-commerce array structures by index tracking
+        hsn_candidates = [c for c in df.columns if any(k in str(c).lower() for k in ['hsn', 'sac', 'code', 'commodity'])]
+        if hsn_candidates:
+            hsn_col = hsn_candidates[0]
+            
+    if not sku_col:
+        sku_candidates = [c for c in df.columns if any(k in str(c).lower() for k in ['sku', 'fsn', 'seller-sku', 'item'])]
+        if sku_candidates:
+            sku_col = sku_candidates[0]
 
-    # 4. EXECUTE ADVANCED DATA RECONCILIATION
-    if hsn_col and sku_col:
-        # Standardize strings, clean out text engine artifact expressions
+    # 4. EXECUTE RIGID RECONCILIATION DATA PASS
+    if hsn_col:
+        # Strip trailing math values (.0) and system NaNs completely out of the string data loop
         df[hsn_col] = df[hsn_col].fillna("").astype(str).str.strip().str.replace(r'\.0+$', '', regex=True)
         df[hsn_col] = df[hsn_col].replace(['nan', 'None', '<na>', '<NA>'], "")
         
-        df[sku_col] = df[sku_col].fillna("").astype(str).str.strip()
+        if sku_col:
+            df[sku_col] = df[sku_col].fillna("").astype(str).str.strip()
 
-        # Counter tracking for visual confirmation
         filled_count = 0
-        still_missing_count = 0
+        padded_count = 0
+        missing_count = 0
 
-        # Smart rows tracking pass loop
         def auto_heal_data(row):
-            global filled_count, still_missing_count
-            current_hsn = row[hsn_col]
-            current_sku = row[sku_col]
-
-            # If the HSN cell is completely empty
-            if not current_hsn or current_hsn == "":
-                # Check if we have this SKU registered in our catalog dictionary
-                if current_sku in sku_hsn_catalog:
-                    filled_count += 1
-                    return sku_hsn_catalog[current_sku] # Plug in the correct HSN code!
-                else:
-                    still_missing_count += 1
-                    return "MISSING HSN" # Fallback if SKU isn't in your catalog list yet
+            global filled_count, padded_count, missing_count
+            val = str(row[hsn_col]).strip()
             
-            # If HSN is present but dropped its leading zero (7 digits long)
-            if len(current_hsn) == 7 and current_hsn.isdigit():
-                return "0" + current_hsn
-                
-            return current_hsn
+            # Use fallback tracking if sku column isn't found
+            sku_val = str(row[sku_col]).strip() if sku_col else ""
 
-        # Apply the healing logic across the sheet row by row
+            # Check for structural blanks
+            if not val or val in ["", "nan", "None"]:
+                if sku_val in sku_hsn_catalog:
+                    filled_count += 1
+                    return sku_hsn_catalog[sku_val]
+                else:
+                    missing_count += 1
+                    return "MISSING HSN"
+
+            # FORCE ADD LEADING ZERO: Strips text fragments and matches exact numeric strings under 8 digits
+            clean_digits = "".join(filter(str.isdigit, val))
+            if len(clean_digits) == 7:
+                padded_count += 1
+                return "0" + clean_digits
+                
+            return clean_digits
+
+        # Run the calculations across your dataframe frame
         df[hsn_col] = df.apply(auto_heal_data, axis=1)
         
-    elif sku_col:
-        df[sku_col] = df[sku_col].fillna("MISSING SKU").astype(str).str.strip()
-
-    # 5. RENDER THE INTERFACE RESULTS
-    st.success(f"✨ Analysis complete! Cleaned up {blank_rows} blank formatting rows.")
-    
-    if 'filled_count' in locals() and filled_count > 0:
-        st.info(f"🧠 Smart Catalog Match: Automatically filled **{filled_count} missing HSN codes** based on their product SKU labels!")
+        # 5. RENDER THE SUCCESS INTERFACE
+        st.success(f"✨ File parsed successfully! Cleaned up {blank_rows} blank rows.")
+        st.info(f"🔢 HSN PADDING UPDATE: Automatically fixed **{padded_count} HSN codes** by adding their missing leading zero!")
         
-    if 'still_missing_count' in locals() and still_missing_count > 0:
-        st.warning(f"⚠️ Found {still_missing_count} rows with blank HSN fields whose SKUs are not in your catalog dictionary yet. Marked as 'MISSING HSN'.")
+        if filled_count > 0:
+            st.info(f"🧠 Catalog Lookup: Filled **{filled_count} empty HSN fields** using your SKU dictionary mapping.")
+        if missing_count > 0:
+            st.warning(f"⚠️ Warning: Found {missing_count} fields that are still blank. Marked as 'MISSING HSN'.")
+            
+    else:
+        st.error("❌ Column Detection Error: The script could not identify an HSN column name in your file. Please verify your file's header layout.")
 
+    # Show data table grid preview
     st.write("### Data Preview Grid:")
     st.dataframe(df.head(50))
     
