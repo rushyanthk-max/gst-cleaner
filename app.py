@@ -33,7 +33,7 @@ if uploaded_file:
     df.dropna(how='all', inplace=True)
     blank_rows = initial_rows - len(df)
 
-    # 3. POSITION-BASED COLUMN SCANNER
+    # 3. ABSOLUTE COLUMN SCANNER (Locked to look for Total Combined Tax)
     hsn_col = None
     sku_col = None
     tax_col = None
@@ -44,29 +44,29 @@ if uploaded_file:
         if 'hsn' in clean_col_name: hsn_col = col
         if 'sku' in clean_col_name or 'fsn' in clean_col_name: sku_col = col
 
-    # HARD TARGET SPECIFIC TAX COLUMNS FOR AMAZON AND FLIPKART
-    amazon_tax_headers = ['igst rate', 'cgst rate', 'sgst rate', 'tax rate', 'invoice level tax']
-    flipkart_tax_headers = ['tax percentage', 'tax rate', 'igst_rate', 'rate_percentage']
+    # EXPLICIT LOOKUP ORDER FOR THE COMBINED TOTAL TAX COLUMN
+    # This ignores sub-split components like CGST or SGST
+    total_tax_keywords = ['total tax rate', 'total tax percentage', 'tax rate', 'tax percentage', 'rate_percentage', 'igst rate']
     
-    # Try exact matches first
+    # Pass 1: Try to look for exact strings that mean "Total Combined Tax"
     for col in df.columns:
         c_low = str(col).strip().lower()
-        if c_low in amazon_tax_headers or c_low in flipkart_tax_headers:
+        if c_low in total_tax_keywords:
             tax_col = col
             break
             
-    # Fallback if names are slightly shifted
+    # Pass 2: If no exact match, grab the generic tax or rate headers as secondary fallback
     if not tax_col:
         for col in df.columns:
             c_low = str(col).strip().lower()
-            if 'igst' in c_low and 'rate' in c_low:
+            if 'total' in c_low and 'tax' in c_low:
                 tax_col = col
                 break
             elif 'tax' in c_low and 'rate' in c_low:
                 tax_col = col
                 break
 
-    # Final emergency fallback if nothing matches
+    # Final emergency fallback if headers are completely unmapped
     if not tax_col:
         tax_candidates = [c for c in df.columns if 'rate' in str(c).lower() or 'tax' in str(c).lower()]
         if tax_candidates: tax_col = tax_candidates[0]
@@ -76,7 +76,7 @@ if uploaded_file:
 
     # 4. EXECUTE DATA RECONCILIATION
     if hsn_col:
-        st.info(f"🔍 System targeted HSN Column: **'{hsn_col}'** | Tax Column: **'{tax_col}'**")
+        st.info(f"🔍 System targeted HSN Column: **'{hsn_col}'** | Targeted Total Tax Column: **'{tax_col}'**")
         
         # Initial Deep Clean
         df[hsn_col] = df[hsn_col].fillna("").astype(str).str.strip().str.replace(r'\.0+$', '', regex=True)
@@ -115,7 +115,6 @@ if uploaded_file:
             def clean_tax_string(val):
                 if pd.isna(val) or str(val).strip() in ['nan', 'None', '', '<NA>']:
                     return "0"
-                # Strip out percentage signs, decimals, and text characters
                 s = str(val).strip().replace('%', '')
                 s = re.sub(r'\.0+$', '', s) # converts 18.00 -> 18
                 s = s.split('.')[0]         # fallback if it's a weird decimal string
@@ -141,7 +140,7 @@ if uploaded_file:
                     correct_majority_tax = hsn_majority_tax_map[hsn]
                     if current_clean_tax != correct_majority_tax:
                         tax_corrections_made += 1
-                        # Maintain original formatting layout type (if the original sheet used decimals, append it back)
+                        # Maintain original formatting layout type
                         if '.' in current_raw_tax:
                             return correct_majority_tax + ".0"
                         if '%' in current_raw_tax:
@@ -174,9 +173,9 @@ if uploaded_file:
         st.info(f"🔢 HSN PADDING UPDATE: Processed and protected **{padded_count} HSN codes** with Excel text shields.")
         
         if tax_col and tax_corrections_made > 0:
-            st.warning(f"⚖️ TAX AUTO-CORRECTION: Overwrote **{tax_corrections_made} rows** in the column **'{tax_col}'** to match the dominant majority tax rate for their HSN groups!")
+            st.warning(f"⚖️ TAX AUTO-CORRECTION: Overwrote **{tax_corrections_made} rows** in your Total Tax column **'{tax_col}'** to fix conflicting double tax rates!")
         elif tax_col:
-            st.success(f"✅ Tax Rate Integrity: Checked all rows under column '{tax_col}'. No conflicting tax rate instances remain.")
+            st.success(f"✅ Tax Rate Integrity: Checked all rows under total tax column '{tax_col}'. No conflicting tax rate instances remain.")
 
         if missing_count > 0:
             st.warning(f"⚠️ Warning: Found {missing_count} fields that remain blank. Marked as 'MISSING HSN'.")
