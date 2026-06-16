@@ -9,8 +9,11 @@ st.title("📦 BCPL E-commerce GST Sanitizer")
 st.write("Drop your raw Amazon or Flipkart sheets below to instantly wipe out errors.")
 
 # =========================================================================
-# 🛑 BCPL MASTER PRODUCT CATALOG (Add your SKUs and correct HSNs here!)
+# 🛑 BCPL CONFIGURATION SETTINGS (Change these to match your exact sheet headers!)
 # =========================================================================
+EXACT_TAX_COLUMN_NAME = "Total Tax Rate"  # 👈 TYPE THE EXACT NAME OF YOUR TOTAL TAX COLUMN HERE
+EXACT_HSN_COLUMN_NAME = "Hsn/sac"         # 👈 TYPE THE EXACT NAME OF YOUR HSN COLUMN HERE
+
 sku_hsn_catalog = {
     "SKU_SAMPLE_1": "33049910",  
     "MUG-BLUE-01": "69111011",   
@@ -33,50 +36,32 @@ if uploaded_file:
     df.dropna(how='all', inplace=True)
     blank_rows = initial_rows - len(df)
 
-    # 3. ABSOLUTE COLUMN SCANNER (Locked to look for Total Combined Tax)
+    # 3. DIRECT NAME ASSIGNMENT
     hsn_col = None
     sku_col = None
     tax_col = None
     
-    # Target exactly the specific column names e-commerce platforms use
+    # Assign the user-configured targets directly first
     for col in df.columns:
-        clean_col_name = str(col).strip().lower()
-        if 'hsn' in clean_col_name: hsn_col = col
-        if 'sku' in clean_col_name or 'fsn' in clean_col_name: sku_col = col
-
-    # EXPLICIT LOOKUP ORDER FOR THE COMBINED TOTAL TAX COLUMN
-    # This ignores sub-split components like CGST or SGST
-    total_tax_keywords = ['total tax rate', 'total tax percentage', 'tax rate', 'tax percentage', 'rate_percentage', 'igst rate']
-    
-    # Pass 1: Try to look for exact strings that mean "Total Combined Tax"
-    for col in df.columns:
-        c_low = str(col).strip().lower()
-        if c_low in total_tax_keywords:
+        if str(col).strip() == EXACT_HSN_COLUMN_NAME:
+            hsn_col = col
+        if str(col).strip() == EXACT_TAX_COLUMN_NAME:
             tax_col = col
-            break
-            
-    # Pass 2: If no exact match, grab the generic tax or rate headers as secondary fallback
-    if not tax_col:
-        for col in df.columns:
-            c_low = str(col).strip().lower()
-            if 'total' in c_low and 'tax' in c_low:
-                tax_col = col
-                break
-            elif 'tax' in c_low and 'rate' in c_low:
-                tax_col = col
-                break
+        if str(col).strip().lower() in ['sku', 'fsn', 'seller-sku', 'item']:
+            sku_col = col
 
-    # Final emergency fallback if headers are completely unmapped
+    # Backups if direct names aren't found in this specific upload file
+    if not hsn_col:
+        hsn_candidates = [c for c in df.columns if 'hsn' in str(c).lower()]
+        if hsn_candidates: hsn_col = hsn_candidates[0]
+        
     if not tax_col:
         tax_candidates = [c for c in df.columns if 'rate' in str(c).lower() or 'tax' in str(c).lower()]
         if tax_candidates: tax_col = tax_candidates[0]
 
-    if "Hsn/sac" in df.columns: hsn_col = "Hsn/sac"
-    if "Sku" in df.columns: sku_col = "Sku"
-
     # 4. EXECUTE DATA RECONCILIATION
     if hsn_col:
-        st.info(f"🔍 System targeted HSN Column: **'{hsn_col}'** | Targeted Total Tax Column: **'{tax_col}'**")
+        st.info(f"🎯 TARGET LOCKED -> HSN Column: **'{hsn_col}'** | Tax Column: **'{tax_col}'**")
         
         # Initial Deep Clean
         df[hsn_col] = df[hsn_col].fillna("").astype(str).str.strip().str.replace(r'\.0+$', '', regex=True)
@@ -116,8 +101,8 @@ if uploaded_file:
                 if pd.isna(val) or str(val).strip() in ['nan', 'None', '', '<NA>']:
                     return "0"
                 s = str(val).strip().replace('%', '')
-                s = re.sub(r'\.0+$', '', s) # converts 18.00 -> 18
-                s = s.split('.')[0]         # fallback if it's a weird decimal string
+                s = re.sub(r'\.0+$', '', s)
+                s = s.split('.')[0]
                 return s if s.isdigit() else "0"
 
             df['_temp_tax_clean'] = df[tax_col].apply(clean_tax_string)
@@ -125,7 +110,6 @@ if uploaded_file:
             # Group by our clean HSN code and look at the standardized Tax values
             for hsn_code, group in df.groupby('_temp_hsn'):
                 if hsn_code != "MISSING HSN" and not group['_temp_tax_clean'].empty:
-                    # Calculate the majority dominant tax integer value
                     majority_tax = group['_temp_tax_clean'].value_counts().index[0]
                     hsn_majority_tax_map[hsn_code] = majority_tax
 
@@ -173,9 +157,9 @@ if uploaded_file:
         st.info(f"🔢 HSN PADDING UPDATE: Processed and protected **{padded_count} HSN codes** with Excel text shields.")
         
         if tax_col and tax_corrections_made > 0:
-            st.warning(f"⚖️ TAX AUTO-CORRECTION: Overwrote **{tax_corrections_made} rows** in your Total Tax column **'{tax_col}'** to fix conflicting double tax rates!")
+            st.warning(f"⚖️ TAX AUTO-CORRECTION: Overwrote **{tax_corrections_made} rows** in your specified column **'{tax_col}'** to fix conflicting double tax rates!")
         elif tax_col:
-            st.success(f"✅ Tax Rate Integrity: Checked all rows under total tax column '{tax_col}'. No conflicting tax rate instances remain.")
+            st.success(f"✅ Tax Rate Integrity: Checked all rows under column '{tax_col}'. No conflicting tax rate instances remain.")
 
         if missing_count > 0:
             st.warning(f"⚠️ Warning: Found {missing_count} fields that remain blank. Marked as 'MISSING HSN'.")
